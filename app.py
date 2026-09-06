@@ -4,9 +4,7 @@ import stripe
 import os
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
-from square.client import Client
-from square.api.payments_api import PaymentsApi
-import uuid
+import paypalrestsdk
 
 load_dotenv()
 
@@ -16,11 +14,12 @@ CORS(app)
 # Initialize Stripe
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 
-# Initialize Square
-square_client = Client(
-    access_token=os.getenv('SQUARE_ACCESS_TOKEN'),
-    environment=os.getenv('SQUARE_ENVIRONMENT', 'production')
-)
+# Initialize PayPal
+paypalrestsdk.configure({
+    "mode": os.getenv('PAYPAL_MODE', 'sandbox'),
+    "client_id": os.getenv('PAYPAL_CLIENT_ID'),
+    "client_secret": os.getenv('PAYPAL_CLIENT_SECRET')
+})
 
 # Initialize Hugging Face
 hf_client = InferenceClient(api_key=os.getenv('HF_TOKEN'))
@@ -29,20 +28,21 @@ hf_client = InferenceClient(api_key=os.getenv('HF_TOKEN'))
 STARTER_PRICE_ID = os.getenv('STRIPE_STARTER_PRICE_ID')
 PRO_PRICE_ID = os.getenv('STRIPE_PRO_PRICE_ID')
 
-# Square pricing (in cents)
-SQUARE_ONE_TIME_PRICE = int(os.getenv('SQUARE_ONE_TIME_PRICE', 500))  # $5.00 default
+# PayPal pricing
+PAYPAL_ONE_TIME_PRICE = os.getenv('PAYPAL_ONE_TIME_PRICE', '5.00')
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        'message': 'AI API with Stripe & Square Integration',
+        'message': 'AI API with Stripe & PayPal Integration',
         'version': '2.0.0',
         'endpoints': {
             'POST /api/generate': 'Generate text using AI',
             'GET /pricing': 'Get pricing plans',
             'POST /checkout': 'Create Stripe checkout session',
-            'POST /square/payment': 'Create Square one-time payment',
-            'GET /square/pricing': 'Get Square pricing'
+            'POST /paypal/payment': 'Create PayPal one-time payment',
+            'POST /paypal/payment/execute': 'Execute PayPal payment',
+            'GET /paypal/pricing': 'Get PayPal pricing'
         }
     })
 
@@ -92,12 +92,12 @@ def get_pricing():
         ]
     })
 
-@app.route('/square/pricing', methods=['GET'])
-def get_square_pricing():
-    """Get Square one-time payment pricing"""
+@app.route('/paypal/pricing', methods=['GET'])
+def get_paypal_pricing():
+    """Get PayPal one-time payment pricing"""
     return jsonify({
         'payment_type': 'one-time',
-        'price': SQUARE_ONE_TIME_PRICE / 100,  # Convert cents to dollars
+        'price': float(PAYPAL_ONE_TIME_PRICE),
         'currency': 'USD',
         'description': 'One-time payment for AI API access'
     })
@@ -129,48 +129,82 @@ def create_checkout():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/square/payment', methods=['POST'])
-def create_square_payment():
-    """Create a Square one-time payment"""
+@app.route('/paypal/payment', methods=['POST'])
+def create_paypal_payment():
+    """Create a PayPal one-time payment"""
     try:
         data = request.json
-        source_id = data.get('source_id')  # Payment token from Square Web Payments SDK
-        
-        if not source_id:
-            return jsonify({'error': 'source_id is required'}), 400
+        return_url = data.get('return_url', 'https://example.com/success')
+        cancel_url = data.get('cancel_url', 'https://example.com/cancel')
         
         # Create payment
-        payments_api = square_client.payments
-        
-        payment = {
-            'source_id': source_id,
-            'amount_money': {
-                'amount': SQUARE_ONE_TIME_PRICE,
-                'currency': 'USD'
+        payment = paypalrestsdk.Payment({
+            "intent": "sale",
+            "payer": {
+                "payment_method": "paypal"
             },
-            'idempotency_key': str(uuid.uuid4()),
-            'receipt_number': str(uuid.uuid4())[:8].upper()
-        }
+            "redirect_urls": {
+                "return_url": return_url,
+                "cancel_url": cancel_url
+            },
+            "transactions": [{
+                "amount": {
+                    "total": PAYPAL_ONE_TIME_PRICE,
+                    "currency": "USD"
+                },
+                "description": "One-time payment for AI API access"
+            }]
+        })
         
-        result = payments_api.create_payment(payment)
-        
-        if result.is_success():
+        if payment.create():
+            # Get approval URL
+            approval_url = None
+            for link in payment.links:
+                if link['rel'] == 'approval_url':
+                    approval_url = link['href']
+            
             return jsonify({
                 'status': 'success',
-                'payment_id': result.result.payment.id,
-                'amount': SQUARE_ONE_TIME_PRICE / 100,
+                'payment_id': payment.id,
+                'approval_url': approval_url,
+                'amount': float(PAYPAL_ONE_TIME_PRICE),
                 'currency': 'USD'
             }), 200
-        elif result.is_client_error():
-            return jsonify({
-                'error': 'Invalid request',
-                'details': result.errors
-            }), 400
         else:
             return jsonify({
-                'error': 'Payment processing failed',
-                'details': result.errors
-            }), 500
+                'error': 'Payment creation failed',
+                'details': payment.error
+            }), 400
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/paypal/payment/execute', methods=['POST'])
+def execute_paypal_payment():
+    """Execute a PayPal payment after user approval"""
+    try:
+        data = request.json
+        payment_id = data.get('payment_id')
+        payer_id = data.get('payer_id')
+        
+        if not payment_id or not payer_id:
+            return jsonify({'error': 'payment_id and payer_id are required'}), 400
+        
+        payment = paypalrestsdk.Payment.find(payment_id)
+        
+        if payment.execute({"payer_id": payer_id}):
+            return jsonify({
+                'status': 'success',
+                'message': 'Payment completed successfully',
+                'payment_id': payment.id,
+                'amount': float(PAYPAL_ONE_TIME_PRICE),
+                'currency': 'USD'
+            }), 200
+        else:
+            return jsonify({
+                'error': 'Payment execution failed',
+                'details': payment.error
+            }), 400
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
