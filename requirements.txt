@@ -1,7 +1,7 @@
 flask==2.3.2
 flask-cors==4.0.0
 stripe==5.14.0
-squareup==35.0.0
+paypalrestsdk==1.7.1
 python-dotenv==1.0.0
 huggingface-hub==0.16.2
 requests==2.31.0
