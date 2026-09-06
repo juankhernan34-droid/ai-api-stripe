@@ -1,5 +1,5 @@
-title: AI API with Stripe
-short_description: AI text generation API with Stripe payment integration
+title: AI API with Stripe & PayPal
+short_description: AI text generation API with Stripe & PayPal payment integration
 license: mit
 sdk: docker
 app_file: app.py
